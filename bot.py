@@ -1,172 +1,199 @@
-import random
 import discord
 from discord.ext import commands, tasks
-from dotenv import load_dotenv
-import os
-from collections import defaultdict
+import asyncio
+import random
 
-# Cargar variables de entorno
-load_dotenv()
-token = os.getenv('DISCORD_TOKEN')
+intents = discord.Intents.all()
+bot = commands.Bot(command_prefix='!mafia ', intents=intents)
 
-# Configurar los intents del bot
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
+partida = {
+    'jugadores': [],
+    'roles': {},
+    'vivos': [],
+    'fase': 'esperando',
+    'canal_mafioso': None,
+    'canal_doctor': None,
+    'votos': {},
+    'votos_recibidos': 0,
+    'objetivo_mafia': None,
+    'objetivo_doctor': None
+}
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Diccionario de partidas
-games = {}
-
-# Roles para 4 jugadores
-ROLES = ['Mafioso', 'Ciudadano', 'Doctor', 'Detective']
-
-@bot.command()
-async def mafia(ctx, action, *args):
-    if ctx.guild is None:
-        await ctx.send("⚠️ Este comando solo puede usarse en un servidor.")
-        return
-    
-    game_id = f"game_{ctx.guild.id}"
-
-    if action == "crear":
-        if game_id in games:
-            await ctx.send("⚠️ Ya hay una partida en curso.")
-            return
-        
-        num_players = 4  
-        games[game_id] = {
-            'host': ctx.channel.id,
-            'players': [ctx.author.id],
-            'max_players': num_players,
-            'roles': {},
-            'state': 'waiting',
-            'votes': defaultdict(int),
-            'night': False,
-            'mafioso_target': None,
-            'doctor_target': None
-        }
-        
-        await ctx.send(f"✅ Se ha creado una partida de Mafia para {num_players} jugadores. Usa `!mafia unirme` para participar.")
-
-    elif action == "unirme":
-        if game_id not in games:
-            await ctx.send("⚠️ No hay ninguna partida en curso. Usa `!mafia crear` para iniciar una.")
-            return
-
-        game = games[game_id]
-        
-        if game['state'] != 'waiting':
-            await ctx.send("⏳ La partida ya ha comenzado. No puedes unirte ahora.")
-            return
-
-        if len(game['players']) >= game['max_players']:
-            await ctx.send(f"⚠️ La partida ya está llena con {game['max_players']} jugadores.")
-            return
-
-        if ctx.author.id in game['players']:
-            await ctx.send("⚠️ Ya estás en la partida.")
-            return
-
-        game['players'].append(ctx.author.id)
-        await ctx.send(f"✅ {ctx.author.mention} se ha unido. Jugadores actuales: {len(game['players'])}/{game['max_players']}.")
-
-        if len(game['players']) == game['max_players']:
-            await assign_roles(ctx, game_id)
-            cambiar_fase_automatica.start(game_id)
-
-async def assign_roles(ctx, game_id):
-    game = games[game_id]
-    players = game['players']
-    random.shuffle(players)
-    
-    roles = ROLES.copy()
-    random.shuffle(roles)
-    
-    game['roles'] = dict(zip(players, roles))
-    game['state'] = 'started'
-    
-    for player_id in players:
-        role = game['roles'][player_id]
-        user = await bot.fetch_user(player_id)
-        
-        if user:
-            try:
-                await user.send(f"🔎 Tu rol es **{role}**. Usa los comandos adecuados para tu rol durante la partida.")
-            except discord.Forbidden:
-                await ctx.send(f"🚫 No pude enviar un mensaje privado a {user.mention}. Asegúrate de permitir DMs del servidor.")
-    
-    await ctx.send("🎭 La partida ha comenzado. Los roles han sido asignados. ¡Buena suerte a todos!")
-
-@tasks.loop(seconds=60)
-async def cambiar_fase_automatica(game_id):
-    if game_id in games:
-        game = games[game_id]
-        game['night'] = not game['night']
-        fase = 'noche' if game['night'] else 'día'
-        
-        for player_id in game['players']:
-            user = await bot.fetch_user(player_id)
-            if user:
-                try:
-                    await user.send(f"🌙 Ha comenzado la **{fase}**.")
-                except discord.Forbidden:
-                    pass
-        
-        channel = bot.get_channel(games[game_id]['host'])
-        if channel:
-            await channel.send(f"🌙 Ahora es {fase}.")
+@bot.event
+async def on_ready():
+    print(f'Conectado como {bot.user}')
 
 @bot.command()
-async def matar(ctx, target: discord.Member):
-    game_id = f"game_{ctx.guild.id}"
-
-    if game_id not in games or games[game_id]['state'] != 'started':
-        await ctx.send("⚠️ No hay una partida en curso.")
-        return
-    
-    game = games[game_id]
-
-    if not game['night']:
-        await ctx.send("⚠️ Solo puedes matar durante la noche.")
+async def crear(ctx, cantidad: int):
+    if partida['fase'] != 'esperando':
+        await ctx.send("Ya hay una partida en curso.")
         return
 
-    if ctx.author.id not in game['players'] or game['roles'][ctx.author.id] != 'Mafioso':
-        await ctx.send("⚠️ Solo el Mafioso puede matar.")
-        return
+    partida['jugadores'] = []
+    partida['roles'] = {}
+    partida['vivos'] = []
+    partida['votos'] = {}
+    partida['votos_recibidos'] = 0
+    partida['fase'] = 'reclutando'
+    partida['canal_mafioso'] = None
+    partida['canal_doctor'] = None
+    partida['objetivo_mafia'] = None
+    partida['objetivo_doctor'] = None
+    partida['cantidad'] = cantidad
 
-    if target.id not in game['players']:
-        await ctx.send("⚠️ Este jugador no está en la partida.")
-        return
-
-    game['mafioso_target'] = target.id
-    await ctx.author.send(f"✅ Has seleccionado a un objetivo. Esperando el resultado de la noche...")
+    await ctx.send(f"¡Partida creada! Se necesitan {cantidad} jugadores. Usa `!mafia unirme` para participar.")
 
 @bot.command()
-async def salvar(ctx, target: discord.Member):
-    game_id = f"game_{ctx.guild.id}"
-
-    if game_id not in games or games[game_id]['state'] != 'started':
-        await ctx.send("⚠️ No hay una partida en curso.")
+async def unirme(ctx):
+    if partida['fase'] != 'reclutando':
+        await ctx.send("No hay una partida disponible para unirse.")
         return
+
+    if ctx.author in partida['jugadores']:
+        await ctx.send("Ya estás en la partida.")
+        return
+
+    if len(partida['jugadores']) >= partida['cantidad']:
+        await ctx.send("La partida ya está llena.")
+        return
+
+    partida['jugadores'].append(ctx.author)
+    partida['vivos'].append(ctx.author)
+
+    await ctx.send(f"{ctx.author.mention} se ha unido a la partida.")
+
+    if len(partida['jugadores']) == partida['cantidad']:
+        partida['fase'] = 'asignando_roles'
+        await asignar_roles(ctx)
+
+async def asignar_roles(ctx):
+    random.shuffle(partida['jugadores'])
     
-    game = games[game_id]
+    # Asignación de roles
+    for i, jugador in enumerate(partida['jugadores']):
+        if i == 0:
+            partida['roles'][jugador] = 'mafioso'
+        elif i == 1:
+            partida['roles'][jugador] = 'doctor'
+        elif i == 2:
+            partida['roles'][jugador] = 'detective'
+        else:
+            partida['roles'][jugador] = 'ciudadano'
 
-    if not game['night']:
-        await ctx.send("⚠️ Solo puedes salvar durante la noche.")
+    # Enviar roles por privado
+    for jugador, rol in partida['roles'].items():
+        await jugador.send(f"Tu rol en la partida es: {rol}")
+
+    # Crear canales privados para mafioso y doctor
+    guild = ctx.guild
+    categoria = discord.utils.get(guild.categories, name="Partidas de Mafia")
+
+    if not categoria:
+        categoria = await guild.create_category("Partidas de Mafia")
+
+    partida['canal_mafioso'] = await categoria.create_text_channel("canal-mafioso", overwrites={
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        partida['jugadores'][0]: discord.PermissionOverwrite(read_messages=True)
+    })
+
+    partida['canal_doctor'] = await categoria.create_text_channel("canal-doctor", overwrites={
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        partida['jugadores'][1]: discord.PermissionOverwrite(read_messages=True)
+    })
+
+    # Mandar links de los canales privados
+    await partida['jugadores'][0].send(f"Tu canal privado para el mafioso: {partida['canal_mafioso'].mention}")
+    await partida['jugadores'][1].send(f"Tu canal privado para el doctor: {partida['canal_doctor'].mention}")
+
+    # Iniciar la partida
+    partida['fase'] = 'jugando'
+    await ctx.send("¡La partida ha comenzado!")
+
+    # Comenzar fase de noche
+    await fase_noche(ctx)
+
+async def fase_noche(ctx):
+    await ctx.send("La fase de noche ha comenzado. El mafioso puede matar y el doctor puede salvar.")
+
+    # Esperar 1 minuto para la fase de noche
+    await asyncio.sleep(60)
+
+    # Fase de día
+    await fase_dia(ctx)
+
+async def fase_dia(ctx):
+    await ctx.send("La fase de día ha comenzado. Todos los jugadores votan para eliminar a alguien.")
+    
+    # Implementar lógica de votación...
+
+@bot.command()
+async def matar(ctx, miembro: discord.Member):
+    if ctx.channel != partida['canal_mafioso']:
+        await ctx.send("Este comando solo puede usarse en el canal privado del mafioso.")
         return
 
-    if ctx.author.id not in game['players'] or game['roles'][ctx.author.id] != 'Doctor':
-        await ctx.send("⚠️ Solo el Doctor puede salvar.")
+    if partida['roles'][ctx.author] != 'mafioso':
+        await ctx.send("Solo el mafioso puede matar.")
         return
 
-    if target.id not in game['players']:
-        await ctx.send("⚠️ Este jugador no está en la partida.")
+    if miembro not in partida['vivos']:
+        await ctx.send("Este jugador ya está muerto.")
         return
 
-    game['doctor_target'] = target.id
-    await ctx.author.send(f"✅ Has seleccionado a un objetivo para salvar esta noche.")
+    partida['vivos'].remove(miembro)
+    await ctx.send(f"{miembro.mention} ha sido eliminado por el mafioso.")
+    await miembro.send("Has sido eliminado del juego.")
 
-# Iniciar el bot
-bot.run(token)
+@bot.command()
+async def salvar(ctx, miembro: discord.Member):
+    if ctx.channel != partida['canal_doctor']:
+        await ctx.send("Este comando solo puede usarse en el canal privado del doctor.")
+        return
+
+    if partida['roles'][ctx.author] != 'doctor':
+        await ctx.send("Solo el doctor puede salvar.")
+        return
+
+    if miembro not in partida['vivos']:
+        await ctx.send("Este jugador ya está muerto.")
+        return
+
+    partida['objetivo_doctor'] = miembro
+    await ctx.send(f"{miembro.mention} ha sido salvado por el doctor.")
+
+@bot.command()
+async def votar(ctx, miembro: discord.Member):
+    if miembro not in partida['vivos']:
+        await ctx.send("Este jugador ya está muerto.")
+        return
+
+    if ctx.author in partida['votos']:
+        await ctx.send("Ya has votado.")
+        return
+
+    partida['votos'][ctx.author] = miembro
+    partida['votos_recibidos'] += 1
+
+    if partida['votos_recibidos'] == len(partida['vivos']):
+        await fin_de_votacion(ctx)
+
+async def fin_de_votacion(ctx):
+    # Contar votos y eliminar jugador
+    votos = {}
+    for votante, objetivo in partida['votos'].items():
+        if objetivo not in votos:
+            votos[objetivo] = 0
+        votos[objetivo] += 1
+
+    max_votos = max(votos.values())
+    victima = [jugador for jugador, voto in votos.items() if voto == max_votos][0]
+
+    partida['vivos'].remove(victima)
+    await ctx.send(f"{victima.mention} ha sido eliminado por votación.")
+    await victima.send("Has sido eliminado del juego.")
+
+    if len(partida['vivos']) == 1:
+        await ctx.send(f"¡{partida['vivos'][0].mention} ha ganado!")
+        partida['fase'] = 'esperando'
+
+bot.run('token')
